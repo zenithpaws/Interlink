@@ -1,8 +1,25 @@
 import React, { useEffect, useState } from 'react';
 import { View, ActivityIndicator } from 'react-native';
-import { subscribeToAuth, getOperatorProfile, OperatorProfile } from '../../src/services/matrixService';
+import { subscribeToAuth, getOperatorProfile, OperatorProfile, DEFAULT_PREFERENCES } from '../../src/services/matrixService';
 import { MatrixAuthScreen } from '../../src/components/MatrixAuthScreen';
 import { InterlinkMatrixUI } from '../../src/components/InterlinkMatrixUI';
+
+// Fallback profile builder for missing/uninitialized Firestore user docs
+const sanitizeProfile = (rawProfile: any, uid: string, email: string): OperatorProfile => {
+  return {
+    uid: rawProfile?.uid || uid,
+    alias: rawProfile?.alias || 'OPERATOR',
+    email: rawProfile?.email || email,
+    clearance: rawProfile?.clearance || 'LEVEL-1',
+    status: rawProfile?.status || 'ONLINE',
+    photoURL: rawProfile?.photoURL || '',
+    preferences: {
+      theme: rawProfile?.preferences?.theme || 'matrix_green',
+      dataSaver: rawProfile?.preferences?.dataSaver ?? false,
+      soundEffects: rawProfile?.preferences?.soundEffects ?? true,
+    },
+  };
+};
 
 export default function App() {
   const [operator, setOperator] = useState<OperatorProfile | null>(null);
@@ -11,17 +28,18 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = subscribeToAuth(async (firebaseUser) => {
       if (firebaseUser) {
-        const profile = await getOperatorProfile(firebaseUser.uid);
-        if (profile) {
-          setOperator(profile);
-        } else {
-          // Default fallback profile if document is initializing
-          setOperator({
-            uid: firebaseUser.uid,
-            alias: firebaseUser.email ? firebaseUser.email.split('@')[0].toUpperCase() : 'OPERATOR',
-            email: firebaseUser.email || '',
-            clearance: 'LEVEL-1',
-          });
+        try {
+          const profile = await getOperatorProfile(firebaseUser.uid);
+          const safeProfile = sanitizeProfile(
+            profile, 
+            firebaseUser.uid, 
+            firebaseUser.email || ''
+          );
+          setOperator(safeProfile);
+        } catch (err) {
+          console.error("Error fetching operator profile:", err);
+          // Fallback if Firestore fails or document is missing
+          setOperator(sanitizeProfile(null, firebaseUser.uid, firebaseUser.email || ''));
         }
       } else {
         setOperator(null);
@@ -40,5 +58,12 @@ export default function App() {
     );
   }
 
-  return operator ? <InterlinkMatrixUI operator={operator} /> : <MatrixAuthScreen />;
+  return operator ? (
+    <InterlinkMatrixUI 
+      operator={operator} 
+      onOperatorUpdated={(updated) => setOperator(updated)} 
+    />
+  ) : (
+    <MatrixAuthScreen />
+  );
 }

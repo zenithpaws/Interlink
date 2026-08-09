@@ -75,8 +75,9 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
 
   const scrollViewRef = useRef<ScrollView>(null);
 
-  const isLightMode = operator.preferences.theme === 'cyber_light';
-  const isDataSaver = operator.preferences.dataSaver;
+  // Replace lines 78 and 79 with safety fallbacks:
+const isLightMode = operator?.preferences?.theme === 'cyber_light';
+const isDataSaver = operator?.preferences?.dataSaver ?? false;
 
   useEffect(() => {
     setLoading(true);
