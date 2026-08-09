@@ -2,6 +2,8 @@ import {
   collection, 
   addDoc, 
   query, 
+  where,
+  getDocs,
   orderBy, 
   onSnapshot, 
   serverTimestamp,
@@ -32,7 +34,6 @@ export interface MatrixLog {
   mediaUrl?: string;
   timestamp: string;
   isEdited?: boolean;
-  recipientUid?: string;
 }
 
 export interface OperatorPreferences {
@@ -51,9 +52,37 @@ export interface OperatorProfile {
   preferences: OperatorPreferences;
 }
 
-// Helper to generate a deterministic DM channel ID between two users
-export const getDmChannelId = (uid1: string, uid2: string): string => {
-  return [uid1, uid2].sort().join('_DM_');
+export const DEFAULT_PREFERENCES: OperatorPreferences = {
+  theme: 'matrix_green',
+  dataSaver: false,
+  soundEffects: true,
+};
+
+// Helper to generate a deterministic DM channel ID between two usernames/aliases (alphabetic sort)
+export const getDmChannelIdByAlias = (alias1: string, alias2: string): string => {
+  const clean1 = alias1.trim().toUpperCase();
+  const clean2 = alias2.trim().toUpperCase();
+  return [clean1, clean2].sort().join('_DM_');
+};
+
+// Find an operator profile by their unique Alias/Username
+export const getOperatorByAlias = async (alias: string): Promise<OperatorProfile | null> => {
+  const cleanAlias = alias.trim().toUpperCase();
+  const q = query(
+    collection(db, 'operators'), 
+    where('alias', '==', cleanAlias)
+  );
+  
+  const querySnap = await getDocs(q);
+  if (!querySnap.empty) {
+    const docData = querySnap.docs[0].data();
+    return {
+      ...docData,
+      status: docData.status || 'ONLINE',
+      preferences: docData.preferences || DEFAULT_PREFERENCES,
+    } as OperatorProfile;
+  }
+  return null;
 };
 
 // --- AUTHENTICATION & PROFILE ---
@@ -69,7 +98,7 @@ export const registerOperator = async (email: string, pass: string, alias: strin
     clearance: 'LEVEL-1',
     status: 'ONLINE',
     photoURL: '',
-    preferences: { theme: 'matrix_green', dataSaver: false, soundEffects: true },
+    preferences: DEFAULT_PREFERENCES,
   };
 
   await setDoc(doc(db, 'operators', user.uid), profile);
@@ -95,11 +124,7 @@ export const getOperatorProfile = async (uid: string): Promise<OperatorProfile |
     return {
       ...data,
       status: data.status || 'ONLINE',
-      preferences: data.preferences || {
-        theme: 'matrix_green',
-        dataSaver: false,
-        soundEffects: true,
-      },
+      preferences: data.preferences || DEFAULT_PREFERENCES,
     } as OperatorProfile;
   }
   return null;
@@ -134,8 +159,7 @@ export const transmitPulse = async (
   sender: string,
   senderUid: string,
   type: MatrixLog['type'] = 'broadcast',
-  mediaUrl?: string,
-  recipientUid?: string
+  mediaUrl?: string
 ) => {
   await addDoc(collection(db, 'channels', channelId, 'pulses'), {
     body,
@@ -143,7 +167,6 @@ export const transmitPulse = async (
     senderUid,
     type,
     mediaUrl: mediaUrl || null,
-    recipientUid: recipientUid || null,
     isEdited: false,
     createdAt: serverTimestamp()
   });
@@ -184,7 +207,6 @@ export const subscribeToChannel = (
         body: data.body || '',
         mediaUrl: data.mediaUrl || undefined,
         isEdited: data.isEdited || false,
-        recipientUid: data.recipientUid || undefined,
         timestamp: date ? date.toLocaleTimeString('en-US', { hour12: false }) : 'SYNCING...',
       };
     });
