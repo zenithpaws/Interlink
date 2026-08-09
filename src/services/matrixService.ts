@@ -58,14 +58,14 @@ export const DEFAULT_PREFERENCES: OperatorPreferences = {
   soundEffects: true,
 };
 
-// Helper to generate a deterministic DM channel ID between two usernames/aliases (alphabetic sort)
+// Deterministic DM channel ID strictly using usernames (alphabetic sort)
 export const getDmChannelIdByAlias = (alias1: string, alias2: string): string => {
   const clean1 = alias1.trim().toUpperCase();
   const clean2 = alias2.trim().toUpperCase();
   return [clean1, clean2].sort().join('_DM_');
 };
 
-// Find an operator profile by their unique Alias/Username
+// Search for an operator profile strictly by Username / Alias
 export const getOperatorByAlias = async (alias: string): Promise<OperatorProfile | null> => {
   const cleanAlias = alias.trim().toUpperCase();
   const q = query(
@@ -151,7 +151,7 @@ export const uploadOperatorAvatar = async (uid: string, uri: string): Promise<st
   return photoURL;
 };
 
-// --- TRANSMISSIONS (EDIT / DELETE / DM) ---
+// --- TRANSMISSIONS (SEND / EDIT / DELETE) ---
 
 export const transmitPulse = async (
   channelId: string, 

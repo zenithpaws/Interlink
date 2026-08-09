@@ -1,23 +1,45 @@
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, TextInput, TouchableOpacity, Modal } from 'react-native';
+import { StyleSheet, View, Text, TextInput, TouchableOpacity, Modal, ActivityIndicator } from 'react-native';
 import { Send, X, Lock } from 'lucide-react-native';
+import { getOperatorByAlias } from '../services/matrixService';
 
 interface Props {
   visible: boolean;
   onClose: () => void;
-  onStartDm: (targetUid: string, targetAlias: string) => void;
+  onStartDm: (targetAlias: string) => void;
 }
 
 export const DirectMessageModal: React.FC<Props> = ({ visible, onClose, onStartDm }) => {
-  const [targetUid, setTargetUid] = useState('');
   const [targetAlias, setTargetAlias] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
-  const handleConnect = () => {
-    if (!targetUid.trim() || !targetAlias.trim()) return;
-    onStartDm(targetUid.trim(), targetAlias.trim().toUpperCase());
-    setTargetUid('');
-    setTargetAlias('');
-    onClose();
+  const handleConnect = async () => {
+    const trimmed = targetAlias.trim().toUpperCase();
+    if (!trimmed) return;
+
+    setLoading(true);
+    setErrorMsg('');
+
+    try {
+      const targetUser = await getOperatorByAlias(trimmed);
+      
+      if (!targetUser) {
+        setErrorMsg(`OPERATOR '${trimmed}' NOT FOUND IN MATRIX DIRECTORY.`);
+        setLoading(false);
+        return;
+      }
+
+      onStartDm(trimmed);
+      setTargetAlias('');
+      setErrorMsg('');
+      onClose();
+    } catch (err) {
+      console.error('Lookup failed:', err);
+      setErrorMsg('SIGNAL INTERRUPTED. COULD NOT VERIFY ALIAS.');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -34,29 +56,34 @@ export const DirectMessageModal: React.FC<Props> = ({ visible, onClose, onStartD
             </TouchableOpacity>
           </View>
 
-          <Text style={styles.subText}>Enter the Operator UID and Alias to open a 1-on-1 encrypted channel.</Text>
+          <Text style={styles.subText}>Enter target Operator Username to open an encrypted channel.</Text>
 
           <TextInput
             style={styles.input}
-            placeholder="Target Operator UID..."
-            placeholderTextColor="#15803d"
-            value={targetUid}
-            onChangeText={setTargetUid}
-            autoCapitalize="none"
-          />
-
-          <TextInput
-            style={styles.input}
-            placeholder="Target Operator Alias (e.g. CYPHER)..."
+            placeholder="Username (e.g. CYPHER)..."
             placeholderTextColor="#15803d"
             value={targetAlias}
-            onChangeText={setTargetAlias}
+            onChangeText={(txt) => {
+              setTargetAlias(txt);
+              setErrorMsg('');
+            }}
+            onSubmitEditing={handleConnect}
+            returnKeyType="done"
             autoCapitalize="characters"
+            autoCorrect={false}
           />
 
-          <TouchableOpacity style={styles.connectBtn} onPress={handleConnect}>
-            <Send size={14} color="#020804" />
-            <Text style={styles.connectBtnText}>ESTABLISH DIRECT LINK</Text>
+          {errorMsg ? <Text style={styles.errorText}>{errorMsg}</Text> : null}
+
+          <TouchableOpacity style={styles.connectBtn} onPress={handleConnect} disabled={loading}>
+            {loading ? (
+              <ActivityIndicator size="small" color="#020804" />
+            ) : (
+              <>
+                <Send size={14} color="#020804" />
+                <Text style={styles.connectBtnText}>ESTABLISH DIRECT LINK</Text>
+              </>
+            )}
           </TouchableOpacity>
         </View>
       </View>
@@ -71,7 +98,8 @@ const styles = StyleSheet.create({
   headerTitleRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   headerTitle: { color: '#22c55e', fontSize: 13, fontWeight: '900', letterSpacing: 1 },
   subText: { color: '#15803d', fontSize: 11, marginBottom: 14 },
-  input: { backgroundColor: '#020804', borderBottomWidth: 1, borderBottomColor: '#22c55e', color: '#22c55e', paddingVertical: 10, paddingHorizontal: 8, fontSize: 13, marginBottom: 12 },
-  connectBtn: { backgroundColor: '#22c55e', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, borderRadius: 4, marginTop: 6 },
+  input: { backgroundColor: '#020804', borderBottomWidth: 1, borderBottomColor: '#22c55e', color: '#22c55e', paddingVertical: 10, paddingHorizontal: 8, fontSize: 13, marginBottom: 10 },
+  errorText: { color: '#ef4444', fontSize: 10, fontWeight: 'bold', marginBottom: 10 },
+  connectBtn: { backgroundColor: '#22c55e', flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10, borderRadius: 4, marginTop: 4 },
   connectBtnText: { color: '#020804', fontWeight: '900', fontSize: 11, letterSpacing: 1 },
 });
