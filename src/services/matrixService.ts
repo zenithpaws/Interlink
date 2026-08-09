@@ -7,7 +7,9 @@ import {
   serverTimestamp,
   doc,
   setDoc,
-  getDoc
+  getDoc,
+  updateDoc,
+  deleteDoc
 } from 'firebase/firestore';
 import { 
   createUserWithEmailAndPassword, 
@@ -19,15 +21,24 @@ import {
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, auth, storage } from '../config/firebase';
 
+export type OperatorStatus = 'ONLINE' | 'IN_FIELD' | 'BUSY' | 'STEALTH';
+
 export interface MatrixLog {
   id: string;
-  type: 'system' | 'broadcast' | 'command' | 'enc_data';
+  type: 'system' | 'broadcast' | 'command' | 'enc_data' | 'dm';
   sender: string;
-  senderUid?: string;
+  senderUid: string;
   body: string;
   mediaUrl?: string;
   timestamp: string;
-  frequency: string;
+  isEdited?: boolean;
+  recipientUid?: string;
+}
+
+export interface OperatorPreferences {
+  theme: 'matrix_green' | 'cyber_light' | 'amber_crt';
+  dataSaver: boolean;
+  soundEffects: boolean;
 }
 
 export interface OperatorProfile {
@@ -35,9 +46,17 @@ export interface OperatorProfile {
   alias: string;
   email: string;
   clearance: string;
+  status: OperatorStatus;
+  photoURL?: string;
+  preferences: OperatorPreferences;
 }
 
-// --- AUTHENTICATION ---
+// Helper to generate a deterministic DM channel ID between two users
+export const getDmChannelId = (uid1: string, uid2: string): string => {
+  return [uid1, uid2].sort().join('_DM_');
+};
+
+// --- AUTHENTICATION & PROFILE ---
 
 export const registerOperator = async (email: string, pass: string, alias: string) => {
   const cred = await createUserWithEmailAndPassword(auth, email, pass);
@@ -48,6 +67,9 @@ export const registerOperator = async (email: string, pass: string, alias: strin
     alias: alias.toUpperCase(),
     email,
     clearance: 'LEVEL-1',
+    status: 'ONLINE',
+    photoURL: '',
+    preferences: { theme: 'matrix_green', dataSaver: false, soundEffects: true },
   };
 
   await setDoc(doc(db, 'operators', user.uid), profile);
@@ -69,49 +91,83 @@ export const subscribeToAuth = (callback: (user: FirebaseUser | null) => void) =
 export const getOperatorProfile = async (uid: string): Promise<OperatorProfile | null> => {
   const userDoc = await getDoc(doc(db, 'operators', uid));
   if (userDoc.exists()) {
-    return userDoc.data() as OperatorProfile;
+    const data = userDoc.data();
+    return {
+      ...data,
+      status: data.status || 'ONLINE',
+      preferences: data.preferences || {
+        theme: 'matrix_green',
+        dataSaver: false,
+        soundEffects: true,
+      },
+    } as OperatorProfile;
   }
   return null;
 };
 
-// --- MEDIA STORAGE UPLOAD ---
+export const updateOperatorStatus = async (uid: string, status: OperatorStatus) => {
+  await updateDoc(doc(db, 'operators', uid), { status });
+};
 
-export const uploadMatrixMedia = async (uri: string): Promise<string> => {
+export const updateOperatorPreferences = async (uid: string, preferences: Partial<OperatorPreferences>) => {
+  await updateDoc(doc(db, 'operators', uid), { preferences });
+};
+
+export const uploadOperatorAvatar = async (uid: string, uri: string): Promise<string> => {
   const response = await fetch(uri);
   const blob = await response.blob();
-  const filename = `transmissions/${Date.now()}_${Math.random().toString(36).substring(7)}`;
+  const filename = `avatars/${uid}_${Date.now()}`;
   const storageRef = ref(storage, filename);
   
   await uploadBytes(storageRef, blob);
-  return await getDownloadURL(storageRef);
+  const photoURL = await getDownloadURL(storageRef);
+
+  await updateDoc(doc(db, 'operators', uid), { photoURL });
+  return photoURL;
 };
 
-// --- FIRESTORE TRANSMISSIONS ---
+// --- TRANSMISSIONS (EDIT / DELETE / DM) ---
 
 export const transmitPulse = async (
-  frequencyId: string, 
+  channelId: string, 
   body: string, 
   sender: string,
   senderUid: string,
   type: MatrixLog['type'] = 'broadcast',
-  mediaUrl?: string
+  mediaUrl?: string,
+  recipientUid?: string
 ) => {
-  await addDoc(collection(db, 'frequencies', frequencyId, 'pulses'), {
+  await addDoc(collection(db, 'channels', channelId, 'pulses'), {
     body,
     sender,
     senderUid,
     type,
     mediaUrl: mediaUrl || null,
+    recipientUid: recipientUid || null,
+    isEdited: false,
     createdAt: serverTimestamp()
   });
 };
 
-export const subscribeToFrequency = (
-  frequencyId: string, 
+export const editPulse = async (channelId: string, pulseId: string, newBody: string) => {
+  const pulseRef = doc(db, 'channels', channelId, 'pulses', pulseId);
+  await updateDoc(pulseRef, {
+    body: newBody,
+    isEdited: true
+  });
+};
+
+export const deletePulse = async (channelId: string, pulseId: string) => {
+  const pulseRef = doc(db, 'channels', channelId, 'pulses', pulseId);
+  await deleteDoc(pulseRef);
+};
+
+export const subscribeToChannel = (
+  channelId: string, 
   callback: (logs: MatrixLog[]) => void
 ) => {
   const q = query(
-    collection(db, 'frequencies', frequencyId, 'pulses'),
+    collection(db, 'channels', channelId, 'pulses'),
     orderBy('createdAt', 'asc')
   );
 
@@ -127,8 +183,9 @@ export const subscribeToFrequency = (
         senderUid: data.senderUid,
         body: data.body || '',
         mediaUrl: data.mediaUrl || undefined,
+        isEdited: data.isEdited || false,
+        recipientUid: data.recipientUid || undefined,
         timestamp: date ? date.toLocaleTimeString('en-US', { hour12: false }) : 'SYNCING...',
-        frequency: frequencyId,
       };
     });
     callback(logs);
