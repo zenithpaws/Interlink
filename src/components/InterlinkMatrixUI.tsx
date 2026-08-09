@@ -9,6 +9,7 @@ import {
   Image,
   ActivityIndicator,
   Platform,
+  Alert,
 } from 'react-native';
 import {
   Send,
@@ -27,12 +28,12 @@ import {
   ChevronLeft,
 } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { storage } from '../config/firebase';
 import {
   OperatorProfile,
   MatrixLog,
   subscribeToChannel,
+  subscribeToUserDms,
+  registerDmForUser,
   transmitPulse,
   editPulse,
   deletePulse,
@@ -81,7 +82,24 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
   const isLightMode = operator?.preferences?.theme === 'cyber_light';
   const isDataSaver = operator?.preferences?.dataSaver ?? false;
 
-  // Real-time channel listener
+  // Real-time listener for user's private DM channel list
+  useEffect(() => {
+    if (!operator?.uid) return;
+
+    const unsubscribeDms = subscribeToUserDms(operator.uid, (userDms) => {
+      setChannels((prevChannels) => {
+        const publicChans = prevChannels.filter((c) => !c.isDm);
+        const existingDmIds = new Set(userDms.map((d) => d.id));
+        const manualDms = prevChannels.filter((c) => c.isDm && !existingDmIds.has(c.id));
+
+        return [...publicChans, ...userDms, ...manualDms];
+      });
+    });
+
+    return () => unsubscribeDms();
+  }, [operator?.uid]);
+
+  // Real-time listener for current active channel transmissions
   useEffect(() => {
     const unsubscribe = subscribeToChannel(activeChannel, (newLogs) => {
       setLogs(newLogs);
@@ -92,23 +110,39 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
   }, [activeChannel]);
 
   const handlePickImage = async () => {
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Denied', 'Permission to access photo gallery is required!');
+      return;
+    }
+
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images'],
-      quality: 0.7,
+      quality: 0.5,
     });
 
-    if (!result.canceled && result.assets[0].uri) {
+    if (!result.canceled && result.assets && result.assets[0].uri) {
       setSelectedImageUri(result.assets[0].uri);
     }
   };
 
+  // Convert image directly to Base64 (No Firebase Storage required)
   const uploadImageAttachment = async (uri: string): Promise<string> => {
     const response = await fetch(uri);
     const blob = await response.blob();
-    const filename = `transmissions/${Date.now()}_${operator.alias}`;
-    const storageRef = ref(storage, filename);
-    await uploadBytes(storageRef, blob);
-    return await getDownloadURL(storageRef);
+
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        if (typeof reader.result === 'string') {
+          resolve(reader.result);
+        } else {
+          reject(new Error('Failed to encode image as Base64 string'));
+        }
+      };
+      reader.onerror = (error) => reject(error);
+      reader.readAsDataURL(blob);
+    });
   };
 
   // TRANSMIT MESSAGE FUNCTION
@@ -116,14 +150,16 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
     if (!inputText.trim() && !selectedImageUri) return;
 
     const messageText = inputText.trim();
-    setInputText(''); // Clear input immediately for smooth UX
+    const imageToSend = selectedImageUri;
+
+    setInputText('');
+    setSelectedImageUri(null);
     setUploading(true);
 
     try {
       let mediaUrl: string | undefined;
-      if (selectedImageUri) {
-        mediaUrl = await uploadImageAttachment(selectedImageUri);
-        setSelectedImageUri(null);
+      if (imageToSend) {
+        mediaUrl = await uploadImageAttachment(imageToSend);
       }
 
       const activeChan = channels.find((c) => c.id === activeChannel);
@@ -134,11 +170,15 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
         messageText,
         operator.alias,
         operator.uid,
+        operator.photoURL,
         isDm ? 'dm' : 'broadcast',
         mediaUrl
       );
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to transmit:', err);
+      Alert.alert('Transmission Failed', err?.message || 'Failed to encode image attachment.');
+      setSelectedImageUri(imageToSend);
+      setInputText(messageText);
     } finally {
       setUploading(false);
     }
@@ -153,12 +193,15 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
   };
 
   // Start DM channel strictly by username
-  const handleStartDm = (targetAlias: string) => {
+  const handleStartDm = async (targetAlias: string) => {
     const cleanTarget = targetAlias.trim().toUpperCase();
     if (cleanTarget === operator.alias.toUpperCase()) return;
 
     const dmChannelId = getDmChannelIdByAlias(operator.alias, cleanTarget);
     const channelName = `@${cleanTarget}`;
+
+    // Index DM channel under user's document
+    await registerDmForUser(operator.uid, dmChannelId, cleanTarget);
 
     if (!channels.some((c) => c.id === dmChannelId)) {
       setChannels((prev) => [...prev, { id: dmChannelId, name: channelName, isDm: true }]);
@@ -275,7 +318,7 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
                 <Image source={{ uri: operator.photoURL }} style={styles.userAvatar} />
               ) : (
                 <View style={styles.avatarPlaceholder}>
-                  <Text style={styles.avatarInitial}>{operator.alias[0]}</Text>
+                  <Text style={styles.avatarInitial}>{operator.alias ? operator.alias[0] : 'U'}</Text>
                 </View>
               )}
               <View>
@@ -326,6 +369,15 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
                 ]}
               >
                 <View style={styles.logHeader}>
+                  {/* SENDER PROFILE PICTURE IN CHAT */}
+                  {log.senderPhotoURL ? (
+                    <Image source={{ uri: log.senderPhotoURL }} style={styles.chatAvatar} />
+                  ) : (
+                    <View style={styles.chatAvatarPlaceholder}>
+                      <Text style={styles.chatAvatarInitial}>{log.sender ? log.sender[0] : 'U'}</Text>
+                    </View>
+                  )}
+
                   <Text style={styles.logSender}>[{log.sender}]</Text>
                   <Text style={styles.logTime}>{log.timestamp}</Text>
                   {log.isEdited && <Text style={styles.editedTag}>(EDITED)</Text>}
@@ -397,9 +449,9 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
           </View>
         )}
 
-        {/* TRANSMITTER BAR (WITH ENTER KEY FIX) */}
+        {/* TRANSMITTER BAR */}
         <View style={[styles.transmitterBar, isLightMode && styles.lightTransmitterBar]}>
-          <TouchableOpacity onPress={handlePickImage} style={styles.attachBtn}>
+          <TouchableOpacity onPress={handlePickImage} style={styles.attachBtn} disabled={uploading}>
             <Paperclip size={18} color="#22c55e" />
           </TouchableOpacity>
 
@@ -409,10 +461,11 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
             placeholderTextColor="#15803d"
             value={inputText}
             onChangeText={setInputText}
-            onSubmitEditing={handleTransmit} // For Native Enter Key
-            onKeyPress={handleKeyPress}       // For Web Enter Key
+            onSubmitEditing={handleTransmit}
+            onKeyPress={handleKeyPress}
             blurOnSubmit={false}
             returnKeyType="send"
+            editable={!uploading}
           />
 
           <TouchableOpacity style={styles.sendBtn} onPress={handleTransmit} disabled={uploading}>
@@ -426,18 +479,22 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
       </View>
 
       {/* MODALS */}
-      <DirectMessageModal
-        visible={isDmModalOpen}
-        onClose={() => setIsDmModalOpen(false)}
-        onStartDm={handleStartDm}
-      />
+      {DirectMessageModal && (
+        <DirectMessageModal
+          visible={isDmModalOpen}
+          onClose={() => setIsDmModalOpen(false)}
+          onStartDm={handleStartDm}
+        />
+      )}
 
-      <MatrixSettingsModal
-        visible={isSettingsOpen}
-        operator={operator}
-        onClose={() => setIsSettingsOpen(false)}
-        onProfileUpdated={onOperatorUpdated}
-      />
+      {MatrixSettingsModal && (
+        <MatrixSettingsModal
+          visible={isSettingsOpen}
+          operator={operator}
+          onClose={() => setIsSettingsOpen(false)}
+          onProfileUpdated={onOperatorUpdated}
+        />
+      )}
     </View>
   );
 };
@@ -472,7 +529,10 @@ const styles = StyleSheet.create({
   logCard: { backgroundColor: '#051409', borderWidth: 1, borderColor: '#0e3a1a', padding: 10, borderRadius: 6, marginBottom: 10 },
   selfLogCard: { borderColor: '#22c55e' },
   lightLogCard: { backgroundColor: '#ffffff', borderColor: '#cbd5e1' },
-  logHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 },
+  logHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 6 },
+  chatAvatar: { width: 22, height: 22, borderRadius: 11, borderWidth: 1, borderColor: '#22c55e' },
+  chatAvatarPlaceholder: { width: 22, height: 22, borderRadius: 11, backgroundColor: '#15803d', justifyContent: 'center', alignItems: 'center' },
+  chatAvatarInitial: { color: '#020804', fontWeight: 'bold', fontSize: 10 },
   logSender: { color: '#22c55e', fontWeight: 'bold', fontSize: 11 },
   logTime: { color: '#15803d', fontSize: 9 },
   editedTag: { color: '#f59e0b', fontSize: 8, fontStyle: 'italic' },

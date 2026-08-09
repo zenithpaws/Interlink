@@ -20,8 +20,7 @@ import {
   onAuthStateChanged,
   User as FirebaseUser 
 } from 'firebase/auth';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, auth, storage } from '../config/firebase';
+import { db, auth } from '../config/firebase';
 
 export type OperatorStatus = 'ONLINE' | 'IN_FIELD' | 'BUSY' | 'STEALTH';
 
@@ -30,6 +29,7 @@ export interface MatrixLog {
   type: 'system' | 'broadcast' | 'command' | 'enc_data' | 'dm';
   sender: string;
   senderUid: string;
+  senderPhotoURL?: string;
   body: string;
   mediaUrl?: string;
   timestamp: string;
@@ -85,6 +85,36 @@ export const getOperatorByAlias = async (alias: string): Promise<OperatorProfile
   return null;
 };
 
+// --- PRIVATE DM INDEXING ---
+
+export const registerDmForUser = async (userUid: string, dmChannelId: string, targetAlias: string) => {
+  const userDmRef = doc(db, 'operators', userUid, 'dm_channels', dmChannelId);
+  await setDoc(userDmRef, {
+    channelId: dmChannelId,
+    targetAlias: targetAlias.toUpperCase(),
+    updatedAt: serverTimestamp()
+  }, { merge: true });
+};
+
+export const subscribeToUserDms = (
+  userUid: string, 
+  callback: (dms: { id: string; name: string; isDm: boolean }[]) => void
+) => {
+  const dmsRef = collection(db, 'operators', userUid, 'dm_channels');
+  
+  return onSnapshot(dmsRef, (snapshot) => {
+    const dmChannels = snapshot.docs.map(docSnap => {
+      const data = docSnap.data();
+      return {
+        id: data.channelId || docSnap.id,
+        name: `@${data.targetAlias}`,
+        isDm: true
+      };
+    });
+    callback(dmChannels);
+  });
+};
+
 // --- AUTHENTICATION & PROFILE ---
 
 export const registerOperator = async (email: string, pass: string, alias: string) => {
@@ -138,14 +168,23 @@ export const updateOperatorPreferences = async (uid: string, preferences: Partia
   await updateDoc(doc(db, 'operators', uid), { preferences });
 };
 
+// Upload Operator Avatar as Base64 (No Firebase Storage required)
 export const uploadOperatorAvatar = async (uid: string, uri: string): Promise<string> => {
   const response = await fetch(uri);
   const blob = await response.blob();
-  const filename = `avatars/${uid}_${Date.now()}`;
-  const storageRef = ref(storage, filename);
-  
-  await uploadBytes(storageRef, blob);
-  const photoURL = await getDownloadURL(storageRef);
+
+  const photoURL: string = await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+      } else {
+        reject(new Error('Failed to convert avatar to Base64'));
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
 
   await updateDoc(doc(db, 'operators', uid), { photoURL });
   return photoURL;
@@ -158,13 +197,42 @@ export const transmitPulse = async (
   body: string, 
   sender: string,
   senderUid: string,
+  senderPhotoURL?: string,
   type: MatrixLog['type'] = 'broadcast',
   mediaUrl?: string
 ) => {
+  // Ensure parent channel doc exists in Firestore
+  const channelRef = doc(db, 'channels', channelId);
+  await setDoc(channelRef, { 
+    lastUpdated: serverTimestamp(),
+    isDm: channelId.includes('_DM_')
+  }, { merge: true });
+
+  // If it's a DM, register channel for the sender AND lookup recipient to register for them too
+  if (channelId.includes('_DM_')) {
+    const parts = channelId.split('_DM_');
+    const targetAlias = parts[0] === sender.toUpperCase() ? parts[1] : parts[0];
+    
+    // Register DM for the current sender
+    await registerDmForUser(senderUid, channelId, targetAlias);
+
+    // Attempt to locate recipient profile to auto-populate DM in their sidebar
+    try {
+      const recipientProfile = await getOperatorByAlias(targetAlias);
+      if (recipientProfile?.uid) {
+        await registerDmForUser(recipientProfile.uid, channelId, sender.toUpperCase());
+      }
+    } catch (e) {
+      console.warn('Recipient auto-indexing deferred:', e);
+    }
+  }
+
+  // Save pulse with sender's photoURL
   await addDoc(collection(db, 'channels', channelId, 'pulses'), {
     body,
     sender,
     senderUid,
+    senderPhotoURL: senderPhotoURL || null,
     type,
     mediaUrl: mediaUrl || null,
     isEdited: false,
@@ -204,6 +272,7 @@ export const subscribeToChannel = (
         type: data.type || 'broadcast',
         sender: data.sender || 'UNKNOWN_NODE',
         senderUid: data.senderUid,
+        senderPhotoURL: data.senderPhotoURL || undefined,
         body: data.body || '',
         mediaUrl: data.mediaUrl || undefined,
         isEdited: data.isEdited || false,
