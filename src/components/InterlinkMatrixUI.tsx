@@ -39,6 +39,7 @@ import {
   deletePulse,
   logoutOperator,
   getDmChannelIdByAlias,
+  getOperatorByAlias,
 } from '../services/matrixService';
 import { DirectMessageModal } from './DirectMessageModal';
 import { MatrixSettingsModal } from './MatrixSettingsModal';
@@ -59,6 +60,35 @@ const DEFAULT_CHANNELS: ChannelItem[] = [
   { id: 'tactical_ops', name: 'TACTICAL_OPS' },
   { id: 'encrypted_feed', name: 'ENCRYPTED_FEED' },
 ];
+
+// Dynamic Auto-Resizing Image Component for Chat Feed
+const AutoResizingImage: React.FC<{ uri: string }> = ({ uri }) => {
+  const [aspectRatio, setAspectRatio] = useState<number>(16 / 9);
+
+  useEffect(() => {
+    if (!uri) return;
+
+    Image.getSize(
+      uri,
+      (width, height) => {
+        if (width && height) {
+          setAspectRatio(width / height);
+        }
+      },
+      (error) => console.warn('Failed to calculate image size:', error)
+    );
+  }, [uri]);
+
+  return (
+    <View style={styles.imageContainer}>
+      <Image
+        source={{ uri }}
+        style={[styles.autoResizingImage, { aspectRatio }]}
+        resizeMode="contain"
+      />
+    </View>
+  );
+};
 
 export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated }) => {
   const [activeChannel, setActiveChannel] = useState('global_broadcast');
@@ -192,7 +222,7 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
     }
   };
 
-  // Start DM channel strictly by username
+  // Start DM channel strictly by username and populate sidebar for BOTH operators in real time
   const handleStartDm = async (targetAlias: string) => {
     const cleanTarget = targetAlias.trim().toUpperCase();
     if (cleanTarget === operator.alias.toUpperCase()) return;
@@ -200,9 +230,20 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
     const dmChannelId = getDmChannelIdByAlias(operator.alias, cleanTarget);
     const channelName = `@${cleanTarget}`;
 
-    // Index DM channel under user's document
-    await registerDmForUser(operator.uid, dmChannelId, cleanTarget);
+    try {
+      // 1. Register DM channel under sender's sidebar index
+      await registerDmForUser(operator.uid, dmChannelId, cleanTarget);
 
+      // 2. Register DM channel under recipient's sidebar index
+      const targetOperator = await getOperatorByAlias(cleanTarget);
+      if (targetOperator?.uid) {
+        await registerDmForUser(targetOperator.uid, dmChannelId, operator.alias);
+      }
+    } catch (err) {
+      console.error('Failed to register DM for recipient:', err);
+    }
+
+    // 3. Update local state and set active channel
     if (!channels.some((c) => c.id === dmChannelId)) {
       setChannels((prev) => [...prev, { id: dmChannelId, name: channelName, isDm: true }]);
     }
@@ -253,7 +294,7 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
           <ScrollView style={styles.channelList}>
             <Text style={styles.sectionHeader}>// PUBLIC FREQUENCIES</Text>
             {channels
-              .filter((c) => !c.isDm)
+              .filter((c) => !c?.isDm)
               .map((chan) => (
                 <TouchableOpacity
                   key={chan.id}
@@ -283,29 +324,38 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
               </TouchableOpacity>
             </View>
 
+            {/* DIRECT MESSAGES LIST */}
             {channels
-              .filter((c) => c.isDm)
-              .map((chan) => (
-                <TouchableOpacity
-                  key={chan.id}
-                  style={[
-                    styles.channelBtn,
-                    activeChannel === chan.id && styles.activeChannelBtn,
-                  ]}
-                  onPress={() => setActiveChannel(chan.id)}
-                >
-                  <Lock size={14} color={activeChannel === chan.id ? '#020804' : '#22c55e'} />
-                  <Text
+              .filter((c) => c?.isDm)
+              .map((chan) => {
+                if (!chan || !chan.id) return null;
+
+                return (
+                  <TouchableOpacity
+                    key={chan.id}
                     style={[
-                      styles.channelBtnText,
-                      activeChannel === chan.id && styles.activeChannelBtnText,
-                      isLightMode && styles.lightText,
+                      styles.channelBtn,
+                      activeChannel === chan.id && styles.activeChannelBtn,
                     ]}
+                    onPress={() => setActiveChannel(chan.id)}
                   >
-                    {chan.name}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    {Lock ? (
+                      <Lock size={14} color={activeChannel === chan.id ? '#020804' : '#22c55e'} />
+                    ) : (
+                      <Text style={{ color: '#22c55e', fontSize: 10 }}>@</Text>
+                    )}
+                    <Text
+                      style={[
+                        styles.channelBtnText,
+                        activeChannel === chan.id && styles.activeChannelBtnText,
+                        isLightMode && styles.lightText,
+                      ]}
+                    >
+                      {chan.name || 'DIRECT_LINK'}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
           </ScrollView>
 
           {/* USER FOOTER */}
@@ -428,7 +478,7 @@ export const InterlinkMatrixUI: React.FC<Props> = ({ operator, onOperatorUpdated
 
                 {/* MEDIA PREVIEWS */}
                 {log.mediaUrl && !isDataSaver && (
-                  <Image source={{ uri: log.mediaUrl }} style={styles.attachedImage} />
+                  <AutoResizingImage uri={log.mediaUrl} />
                 )}
                 {log.mediaUrl && isDataSaver && (
                   <Text style={styles.dataSaverText}>[ATTACHMENT HIDDEN - DATA SAVER ON]</Text>
@@ -542,7 +592,18 @@ const styles = StyleSheet.create({
   editContainer: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   editInput: { flex: 1, backgroundColor: '#020804', color: '#22c55e', padding: 6, borderRadius: 4, borderWidth: 1, borderColor: '#22c55e', fontSize: 12 },
   editActions: { flexDirection: 'row', gap: 8 },
-  attachedImage: { width: '100%', height: 200, borderRadius: 4, marginTop: 8 },
+  imageContainer: {
+    width: '100%',
+    maxWidth: 400,
+    marginTop: 8,
+    borderRadius: 6,
+    overflow: 'hidden',
+    backgroundColor: '#020804',
+  },
+  autoResizingImage: {
+    width: '100%',
+    maxHeight: 450,
+  },
   dataSaverText: { color: '#f59e0b', fontSize: 9, fontStyle: 'italic', marginTop: 4 },
   previewBar: { flexDirection: 'row', alignItems: 'center', gap: 8, padding: 8, backgroundColor: '#051409', borderTopWidth: 1, borderTopColor: '#22c55e' },
   previewThumbnail: { width: 24, height: 24, borderRadius: 4 },
